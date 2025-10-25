@@ -484,7 +484,7 @@ class AscendAttnBackend(AttentionBackend):
             actual_seq_lengths_kv = (
                 self.forward_metadata.seq_lens_cpu_int.cpu().int().tolist()
             )
-        if forward_batch.forward_mode.is_draft_extend():
+        if forward_batch.forward_mode.is_draft_extend() and not self.graph_mode:
             actual_seq_lengths = (
                 np.array(forward_batch.extend_seq_lens_cpu).cumsum().tolist()
             )

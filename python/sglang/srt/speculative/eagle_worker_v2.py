@@ -19,6 +19,9 @@ from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
 from sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner import (
     EAGLEDraftExtendCudaGraphRunner,
 )
+from sglang.srt.speculative.eagle_draft_extend_npu_graph_runner import (
+    EAGLEDraftExtendNpuGraphRunner,
+)
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
 from sglang.srt.speculative.eagle_info_v2 import (
     assign_extend_cache_locs,
@@ -206,11 +209,11 @@ class EagleDraftWorker(BaseDraftWorker):
         self.cuda_graph_runner = None
         self.cuda_graph_runner_for_draft_extend = None
 
-        if self.server_args.disable_cuda_graph or is_npu():
+        if self.server_args.disable_cuda_graph:
             return
 
         # Capture draft
-        if self.speculative_num_steps > 1:
+        if self.speculative_num_steps > 1 and not is_npu():
             tic = time.perf_counter()
             before_mem = get_available_gpu_memory(self.device, self.gpu_id)
             logger.info(
@@ -229,8 +232,10 @@ class EagleDraftWorker(BaseDraftWorker):
             logger.info(
                 f"Capture draft extend cuda graph begin. This can take up to several minutes. avail mem={before_mem:.2f} GB"
             )
-            self.cuda_graph_runner_for_draft_extend = EAGLEDraftExtendCudaGraphRunner(
-                self
+            self.cuda_graph_runner_for_draft_extend = (
+                EAGLEDraftExtendCudaGraphRunner(self)
+                if not is_npu()
+                else EAGLEDraftExtendNpuGraphRunner(self)
             )
             after_mem = get_available_gpu_memory(self.device, self.gpu_id)
             logger.info(
@@ -466,6 +471,7 @@ class EagleDraftWorker(BaseDraftWorker):
                 batch_result.next_token_ids,
                 self.speculative_num_draft_tokens,
                 self.draft_runner,
+                self.cuda_graph_runner_for_draft_extend,
             )
 
         if self.plan_stream:
@@ -474,9 +480,18 @@ class EagleDraftWorker(BaseDraftWorker):
             )
 
         # Run draft extend batch in the main compute stream
-        draft_logits_output = self.draft_runner.model.forward(
-            forward_batch.input_ids, forward_batch.positions, forward_batch
+        can_cuda_graph = (
+            self.cuda_graph_runner_for_draft_extend
+            and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
         )
+        if can_cuda_graph:
+            draft_logits_output = self.cuda_graph_runner_for_draft_extend.replay(
+                forward_batch
+            )
+        else:
+            draft_logits_output = self.draft_runner.model.forward(
+                forward_batch.input_ids, forward_batch.positions, forward_batch
+            )
 
         # Reorganize the spec info for the next batch
         draft_logits_output.next_token_logits = draft_logits_output.next_token_logits[

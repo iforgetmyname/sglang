@@ -181,6 +181,7 @@ class EagleDraftInputV2Mixin:
         predict: torch.Tensor,
         num_draft_tokens: int,
         draft_model_runner: Any,
+        cuda_graph_runner: Any,
     ):
         seq_lens_cpu_ = batch.seq_lens_cpu
         extend_num_tokens = len(batch.seq_lens) * num_draft_tokens
@@ -200,7 +201,8 @@ class EagleDraftInputV2Mixin:
             else ForwardMode.DRAFT_EXTEND_V2
         )
         forward_batch = ForwardBatch.init_new(batch, draft_model_runner)
-        if not batch.forward_mode.is_idle():
+        can_cuda_graph = cuda_graph_runner and cuda_graph_runner.can_run(forward_batch)
+        if not batch.forward_mode.is_idle() and not can_cuda_graph:
             draft_model_runner.attn_backend.init_forward_metadata(forward_batch)
         return forward_batch
 

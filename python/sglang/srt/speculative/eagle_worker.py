@@ -30,6 +30,10 @@ from sglang.srt.speculative.eagle_draft_cuda_graph_runner import (
 from sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner import (
     EAGLEDraftExtendCudaGraphRunner,
 )
+from sglang.srt.speculative.eagle_draft_extend_npu_graph_runner import (
+    EAGLEDraftExtendNpuGraphRunner,
+)
+from sglang.srt.speculative.eagle_draft_npu_graph_runner import EAGLEDraftNpuGraphRunner
 from sglang.srt.speculative.eagle_info import (
     EagleDraftInput,
     EagleVerifyInput,
@@ -211,9 +215,13 @@ class EAGLEWorker(TpModelWorker):
         self.cuda_graph_runner = None
         self.cuda_graph_runner_for_draft_extend = None
 
-        if self.server_args.disable_cuda_graph or _is_npu:
+        if self.server_args.disable_cuda_graph:
             return
 
+        Device2DraftCudaGraphRunner = {
+            "npu": EAGLEDraftNpuGraphRunner,
+            "cuda": EAGLEDraftCudaGraphRunner,
+        }
         # Capture draft
         if self.speculative_num_steps > 1:
             tic = time.perf_counter()
@@ -221,12 +229,18 @@ class EAGLEWorker(TpModelWorker):
             logger.info(
                 f"Capture draft cuda graph begin. This can take up to several minutes. avail mem={before_mem:.2f} GB"
             )
-            self.cuda_graph_runner = EAGLEDraftCudaGraphRunner(self)
+            self.cuda_graph_runner = Device2DraftCudaGraphRunner[
+                self.target_worker.device
+            ](self)
             after_mem = get_available_gpu_memory(self.device, self.gpu_id)
             logger.info(
                 f"Capture draft cuda graph end. Time elapsed: {time.perf_counter() - tic:.2f} s. mem usage={(before_mem - after_mem):.2f} GB. avail mem={after_mem:.2f} GB."
             )
 
+        Device2ExtendCudaGraphRunner = {
+            "npu": EAGLEDraftExtendNpuGraphRunner,
+            "cuda": EAGLEDraftExtendCudaGraphRunner,
+        }
         # Capture extend
         if self.draft_extend_attn_backend:
             tic = time.perf_counter()
@@ -234,9 +248,9 @@ class EAGLEWorker(TpModelWorker):
             logger.info(
                 f"Capture draft extend cuda graph begin. This can take up to several minutes. avail mem={before_mem:.2f} GB"
             )
-            self.cuda_graph_runner_for_draft_extend = EAGLEDraftExtendCudaGraphRunner(
-                self
-            )
+            self.cuda_graph_runner_for_draft_extend = Device2ExtendCudaGraphRunner[
+                self.target_worker.device
+            ](self)
             after_mem = get_available_gpu_memory(self.device, self.gpu_id)
             logger.info(
                 f"Capture draft extend cuda graph end. Time elapsed: {time.perf_counter() - tic:.2f} s. mem usage={(before_mem - after_mem):.2f} GB. avail mem={after_mem:.2f} GB."

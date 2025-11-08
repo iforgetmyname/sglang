@@ -448,9 +448,11 @@ class EagleDraftWorker(BaseDraftWorker):
             verified_id=next_token_ids,
             new_seq_lens=batch.seq_lens,
             allocate_lens=batch.seq_lens,
+            # draft mode is same with decode mode, only 1 num token per batch
             num_tokens_per_batch=1,
             num_tokens_for_logprob_per_batch=1,
         )
+
         batch.spec_info = next_draft_input
 
         # Run forward

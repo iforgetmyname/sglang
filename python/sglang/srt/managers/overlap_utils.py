@@ -129,19 +129,11 @@ class FutureMap:
     def store_to_map(
         self, future_indices: FutureIndices, batch_result: GenerationBatchResult
     ):
-        intv = future_indices.interval
         if self.spec_algo.is_eagle():
-            if self.is_empty_slice(intv):
-                return
             draft_input: EagleDraftInput = batch_result.next_draft_input
-            self._lazy_init_buf(draft_input)
-            if self.buf_initialized:
-                self.topk_p_buf[intv] = draft_input.topk_p
-                self.topk_index_buf[intv] = draft_input.topk_index
-                self.hidden_states_buf[intv] = draft_input.hidden_states
-                self.verified_id_buf[intv] = draft_input.verified_id
-                self.new_seq_lens_buf[intv] = draft_input.new_seq_lens
+            self.store_to_map_for_new_batch(future_indices, draft_input)
         else:
+            intv = future_indices.interval
             self.token_ids_buf[intv] = batch_result.next_token_ids
 
     def store_to_map_for_new_batch(
@@ -149,6 +141,7 @@ class FutureMap:
     ):
         intv = future_indices.interval
         if self.spec_algo.is_eagle():
+            # idle indices do not need store info
             if self.is_empty_slice(intv):
                 return
             self._lazy_init_buf(draft_input)

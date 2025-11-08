@@ -161,7 +161,7 @@ class EAGLEDraftExtendCudaGraphRunner:
                 (
                     (
                         self.max_bs * self.num_tokens_per_bs
-                        if not hasattr(eagle_worker, "model_runner")
+                        if self.forward_mode == ForwardMode.DRAFT_EXTEND_V2
                         else self.max_bs
                     ),
                     vocab_size,
@@ -437,20 +437,20 @@ class EAGLEDraftExtendCudaGraphRunner:
         out = self.output_buffers[bs]
 
         if self.forward_mode == ForwardMode.DRAFT_EXTEND_V2:
-            out_copy = out
-            out = LogitsProcessorOutput(
-                next_token_logits=out.next_token_logits[:num_tokens],
-                hidden_states=out.hidden_states[:num_tokens],
-            )
-            out.topk_p = out_copy.topk_p[:num_tokens]
-            out.topk_index = out_copy.topk_index[:num_tokens]
+            # DRAFT_EXTEND_V2: all tokens calculations whether accepted or not.
+            unpadding_bs = num_tokens
         elif bs != raw_bs:
             forward_batch.spec_info.accept_length = self.accept_length[:raw_bs]
+            unpadding_bs = raw_bs
+        else:
+            unpadding_bs = None
+
+        if unpadding_bs:
             out_copy = out
             out = LogitsProcessorOutput(
-                next_token_logits=out.next_token_logits[:raw_bs],
-                hidden_states=out.hidden_states[:raw_bs],
+                next_token_logits=out.next_token_logits[:unpadding_bs],
+                hidden_states=out.hidden_states[:unpadding_bs],
             )
-            out.topk_p = out_copy.topk_p[:raw_bs]
-            out.topk_index = out_copy.topk_index[:raw_bs]
+            out.topk_p = out_copy.topk_p[:unpadding_bs]
+            out.topk_index = out_copy.topk_index[:unpadding_bs]
         return out

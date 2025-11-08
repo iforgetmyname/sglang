@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
+    from sglang.srt.managers.overlap_utils import FutureMap
     from sglang.srt.managers.schedule_batch import ScheduleBatch
     from sglang.srt.server_args import ServerArgs
 
@@ -101,7 +102,10 @@ class ScheduleBatchDisaggregationDecodeMixin:
         )
 
     def process_prebuilt_extend(
-        self: ScheduleBatch, server_args: ServerArgs, model_config: ModelConfig
+        self: ScheduleBatch,
+        server_args: ServerArgs,
+        model_config: ModelConfig,
+        future_map: FutureMap,
     ):
         """Assign the buffered last input id to schedule batch"""
         self.output_ids = []
@@ -167,9 +171,14 @@ class ScheduleBatchDisaggregationDecodeMixin:
                 verified_id=self.output_ids,
                 new_seq_lens=self.seq_lens,
                 allocate_lens=self.seq_lens,
-                num_tokens_per_batch=1,
-                num_tokens_for_logprob_per_batch=1,
             )
             spec_info.prepare_for_extend(self)
             spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
+            if self.spec_algorithm.is_eagle() and self.enable_overlap:
+                self.spec_info.future_indices = future_map.alloc_future_indices(
+                    len(self.seq_lens)
+                )
+                future_map.store_to_map_for_new_batch(
+                    self.spec_info.future_indices, self.spec_info
+                )
             self.spec_info = spec_info

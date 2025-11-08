@@ -174,11 +174,11 @@ class ScheduleBatchDisaggregationDecodeMixin:
             )
             spec_info.prepare_for_extend(self)
             spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
-            if self.spec_algorithm.is_eagle() and self.enable_overlap:
-                self.spec_info.future_indices = future_map.alloc_future_indices(
+            if self.enable_overlap:
+                spec_info.future_indices = future_map.alloc_future_indices(
                     len(self.seq_lens)
                 )
                 future_map.store_to_map_for_new_batch(
-                    self.spec_info.future_indices, self.spec_info
+                    spec_info.future_indices, spec_info
                 )
             self.spec_info = spec_info

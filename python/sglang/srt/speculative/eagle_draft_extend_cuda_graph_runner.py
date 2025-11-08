@@ -445,7 +445,7 @@ class EAGLEDraftExtendCudaGraphRunner:
         else:
             unpadding_bs = None
 
-        if unpadding_bs:
+        if unpadding_bs is not None:
             out_copy = out
             out = LogitsProcessorOutput(
                 next_token_logits=out.next_token_logits[:unpadding_bs],

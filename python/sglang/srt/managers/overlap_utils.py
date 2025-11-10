@@ -102,12 +102,7 @@ class FutureMap:
         if self.spec_algo.is_eagle():
             # TODO(lsyin): write future indices into spec_info.future_indices
             draft_input: EagleDraftInput = model_worker_batch.spec_info
-            if (
-                draft_input is None
-                or model_worker_batch.forward_mode.is_idle()
-                or draft_input.future_indices is None
-                or not self.buf_initialized
-            ):
+            if draft_input is None:
                 # FIXME(lsyin): No future exists, only for prefill batch, not compatible with mixed mode
                 return
             indices = draft_input.future_indices.indices
@@ -118,13 +113,6 @@ class FutureMap:
             draft_input.new_seq_lens = self.new_seq_lens_buf[indices]
         else:
             _resolve_future_token_ids(model_worker_batch.input_ids, self.token_ids_buf)
-
-    def is_empty_slice(self, s: slice) -> bool:
-        start, stop, step = s.indices(self.future_buffer_len)
-        if step > 0:
-            return start >= stop
-        else:
-            return start <= stop
 
     def store_to_map(
         self, future_indices: FutureIndices, batch_result: GenerationBatchResult
@@ -141,13 +129,9 @@ class FutureMap:
     ):
         intv = future_indices.interval
         if self.spec_algo.is_eagle():
-            # idle indices do not need store info
-            if self.is_empty_slice(intv):
-                return
             self._lazy_init_buf(draft_input)
-            if self.buf_initialized:
-                self.topk_p_buf[intv] = draft_input.topk_p
-                self.topk_index_buf[intv] = draft_input.topk_index
-                self.hidden_states_buf[intv] = draft_input.hidden_states
-                self.verified_id_buf[intv] = draft_input.verified_id
-                self.new_seq_lens_buf[intv] = draft_input.new_seq_lens
+            self.topk_p_buf[intv] = draft_input.topk_p
+            self.topk_index_buf[intv] = draft_input.topk_index
+            self.hidden_states_buf[intv] = draft_input.hidden_states
+            self.verified_id_buf[intv] = draft_input.verified_id
+            self.new_seq_lens_buf[intv] = draft_input.new_seq_lens

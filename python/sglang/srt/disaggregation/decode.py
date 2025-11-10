@@ -1028,9 +1028,7 @@ class SchedulerDisaggregationDecodeMixin:
 
         # construct fake completed prefill
         new_batch.prepare_for_prebuilt_extend()
-        new_batch.process_prebuilt_extend(
-            self.server_args, self.model_config, self.future_map
-        )
+        new_batch.process_prebuilt_extend(self.server_args, self.future_map)
 
         return new_batch
 

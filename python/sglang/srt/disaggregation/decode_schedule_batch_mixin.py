@@ -13,7 +13,6 @@ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from sglang.srt.configs.model_config import ModelConfig
     from sglang.srt.managers.overlap_utils import FutureMap
     from sglang.srt.managers.schedule_batch import ScheduleBatch
     from sglang.srt.server_args import ServerArgs
@@ -104,7 +103,6 @@ class ScheduleBatchDisaggregationDecodeMixin:
     def process_prebuilt_extend(
         self: ScheduleBatch,
         server_args: ServerArgs,
-        model_config: ModelConfig,
         future_map: FutureMap,
     ):
         """Assign the buffered last input id to schedule batch"""

@@ -1706,8 +1706,43 @@ class Scheduler(
                     # Merge running_batch with prefill batch
                     self.running_batch.merge_batch(self.last_batch)
 
-        new_batch = self.get_new_batch_prefill()
-
+        if False:
+            global_info_tensor = torch.empty(
+                (self.dp_size, self.attn_tp_size, 1),
+                dtype=torch.int64,
+                device="cpu",
+            )
+            now_running_batch = torch.tensor(
+                [
+                    self.running_batch.batch_size(),
+                ],
+                device="cpu",
+                dtype=torch.int64,
+            )
+            # print(f"{global_info_tensor.shape=} {now_running_batch.shape=}")
+            torch.distributed.all_gather_into_tensor(
+                global_info_tensor.flatten(),
+                now_running_batch,
+                group=self.tp_worker.get_tp_group().cpu_group,
+            )
+            tp0_info = global_info_tensor[:, 0, :]
+            # max_batch = int(tp0_info[:, 0].max().item())
+            # min_batch = int(tp0_info[:, 0].min().item())
+            if int(tp0_info[:, 0].max().item()) == 32:
+                new_batch = None
+                # no_new_batch = True
+            else:
+                new_batch = self.get_new_batch_prefill()
+        else:
+            new_batch = self.get_new_batch_prefill()
+            # no_new_batch = False
+        # if decode_batch_max == 24:
+        #     不允许prefill进入
+        # 1. decode + None -> decode + idle
+        # 2. decode + prefill -> idle + prefill xx
+        # 3. decode + decode -> decode  + decode
+        # 4. prefill + None -> prefill + None
+        # 5. prefill + prefill -> prefill  + prefill
         need_mlp_sync = self.require_mlp_sync
         if need_mlp_sync and not self.spec_algorithm.is_none():
             # NOTE: This branch makes sure prefill and decode batches will not be mixed when spec and dp-attn is enabled.

@@ -154,7 +154,7 @@ _is_cpu = is_cpu()
 _device_sm = get_device_sm()
 _is_gfx95_supported = is_gfx95_supported()
 _use_ag_after_qlora = get_bool_env_var("SGLANG_USE_AG_AFTER_QLORA")
-_use_fia_nz = get_bool_env_var("SGLANG_USE_FIA_NZ")
+_use_fia_nz = get_bool_env_var("SGLANG_USE_FIA_NZ") and is_mla_preprocess_enabled()
 
 _use_aiter_gfx95 = _use_aiter and _is_gfx95_supported
 
@@ -1239,7 +1239,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 scaling_factor = rope_scaling["factor"]
                 mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
                 self.scaling = self.scaling * mscale * mscale
-            else:
+            elif not _is_npu:
                 self.rotary_emb.forward = self.rotary_emb.forward_native
         else:
             self.rotary_emb = None

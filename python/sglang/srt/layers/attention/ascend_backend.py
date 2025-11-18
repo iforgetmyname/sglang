@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-_use_fia_nz = get_bool_env_var("SGLANG_USE_FIA_NZ")
+_use_fia_nz = get_bool_env_var("SGLANG_USE_FIA_NZ") and is_mla_preprocess_enabled()
 
 
 def _reshape_kv_for_fia_nz(

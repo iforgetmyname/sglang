@@ -301,6 +301,18 @@ class NPUFusedMLAPreprocess(torch.nn.Module):
         #     1,
         #     forward_batch.attn_backend.qk_rope_head_dim,
         # )
+        self.kvCache = self.kvCache.view(
+            -1,
+            forward_batch.attn_backend.page_size,
+            1,
+            forward_batch.attn_backend.kv_lora_rank,
+        )
+        self.kvCacheRope = self.kvCacheRope.view(
+            -1,
+            forward_batch.attn_backend.page_size,
+            1,
+            forward_batch.attn_backend.qk_rope_head_dim,
+        )
         k_rope, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             latent_cache,
             self.kv_a_layernorm.weight,

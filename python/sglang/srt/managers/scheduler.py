@@ -1706,7 +1706,7 @@ class Scheduler(
                     # Merge running_batch with prefill batch
                     self.running_batch.merge_batch(self.last_batch)
 
-        if False:
+        if True:
             global_info_tensor = torch.empty(
                 (self.dp_size, self.attn_tp_size, 1),
                 dtype=torch.int64,
@@ -1728,7 +1728,7 @@ class Scheduler(
             tp0_info = global_info_tensor[:, 0, :]
             # max_batch = int(tp0_info[:, 0].max().item())
             # min_batch = int(tp0_info[:, 0].min().item())
-            if int(tp0_info[:, 0].max().item()) == 32:
+            if int(tp0_info[:, 0].max().item()) == self.max_running_requests:
                 new_batch = None
                 # no_new_batch = True
             else:

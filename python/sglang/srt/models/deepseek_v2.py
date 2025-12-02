@@ -141,7 +141,11 @@ from sglang.srt.utils import (
     is_nvidia_cublas_cu12_version_ge_12_9,
     log_info_on_rank0,
     make_layers,
+    process_routed_expert,
+    process_shared_expert,
     use_intel_amx_backend,
+    wait_routed_stream,
+    wait_share_stream,
 )
 
 _is_hip = is_hip()
@@ -944,7 +948,10 @@ class DeepseekV2MoE(nn.Module):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
             if not self._fuse_shared_experts_inside_sbo:
-                shared_output = self._forward_shared_experts(hidden_states)
+                # shared_output = self._forward_shared_experts(hidden_states)
+                shared_output = process_shared_expert(
+                    hidden_states, self._forward_shared_experts
+                )
             topk_output = self.topk(
                 hidden_states,
                 router_logits,
@@ -963,22 +970,27 @@ class DeepseekV2MoE(nn.Module):
                 nonlocal shared_output
                 shared_output = self._forward_shared_experts(hidden_states)
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            topk_output=topk_output,
-            **(
-                dict(
-                    forward_shared_experts=_forward_shared_experts_and_put_results,
-                    alt_stream=self.alt_stream,
-                    # SBO is not yet implemented for NextN
-                    disable_sbo=self.is_nextn,
-                )
-                if self._fuse_shared_experts_inside_sbo
-                else {}
-            ),
+        final_hidden_states = process_routed_expert(
+            hidden_states, topk_output, self.experts
         )
+        # final_hidden_states = self.experts(
+        #    hidden_states=hidden_states,
+        #    topk_output=topk_output,
+        #    **(
+        #        dict(
+        #            forward_shared_experts=_forward_shared_experts_and_put_results,
+        #            alt_stream=self.alt_stream,
+        # SBO is not yet implemented for NextN
+        #            disable_sbo=self.is_nextn,
+        #        )
+        #        if self._fuse_shared_experts_inside_sbo
+        #        else {}
+        #    ),
+        # )
 
         if shared_output is not None:
+            wait_share_stream()
+            wait_routed_stream()
             x = shared_output
             if self.experts.should_fuse_routed_scaling_factor_in_topk:
                 x.add_(final_hidden_states)

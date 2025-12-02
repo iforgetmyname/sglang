@@ -99,7 +99,6 @@ logger = logging.getLogger(__name__)
 show_time_cost = False
 time_infos = {}
 
-
 HIP_FP8_E4M3_FNUZ_MAX = 224.0
 
 
@@ -278,7 +277,6 @@ try:
     )
 except:
     is_intel_amx_backend_available = False
-
 
 try:
     # move torch._C._cpu._is_amx_tile_supported() from cpu_has_amx_support
@@ -3443,7 +3441,6 @@ def json_list_type(value):
 
 @contextmanager
 def maybe_reindex_device_id(gpu_id: int):
-
     if envs.SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS.get() is False or not is_cuda_alike():
         yield gpu_id
         return
@@ -3659,3 +3656,87 @@ def raise_error_or_warn(obj, strict, counter_name, message, log_interval=1000):
         if count % log_interval == 0:
             logger.warning(message)
         setattr(obj, counter_name, count + 1)
+
+
+share_stream = None
+routed_stream = None
+
+
+def get_share_stream():
+    """
+    Cache Management Operation(CMO).
+    Launch a new stream to prefetch the weight of matmul when running other
+    AIV or communication kernels, aiming to overlap the memory access time.
+    """
+    global share_stream
+    return share_stream
+
+
+def set_share_stream(stream):
+    global share_stream
+    share_stream = stream
+    torch.npu.set_stream_limit(share_stream, 8, 16)
+
+
+def get_routed_stream():
+    """
+    Cache Management Operation(CMO).
+    Launch a new stream to prefetch the weight of matmul when running other
+    AIV or communication kernels, aiming to overlap the memory access time.
+    """
+    global routed_stream
+    return routed_stream
+
+
+def set_routed_stream(stream):
+    global routed_stream
+    routed_stream = stream
+    torch.npu.set_stream_limit(routed_stream, 16, 32)
+
+
+def wait_share_stream():
+    stream = get_share_stream()
+    if stream is not None:
+        cur_stream = torch.get_device_module().current_stream()
+        cur_stream.wait_stream(stream)
+
+
+def wait_routed_stream():
+    stream = get_routed_stream()
+    if stream is not None:
+        cur_stream = torch.get_device_module().current_stream()
+        cur_stream.wait_stream(stream)
+
+
+def process_shared_expert(hidden_states, forward_func):
+    """
+    PREFETCH_MAX_SIZE: maximum size (bytes) for each prefetch operation.
+    This affects the time spent in prefetch:
+        time ≈ PREFETCH_MAX_SIZE / system_bandwidth
+    """
+    # import torch_npu
+    stream = get_share_stream()
+    if stream is None:
+        stream = torch.get_device_module().Stream()
+        set_share_stream(stream)
+    stream.wait_stream(torch.get_device_module().current_stream())
+    with torch.get_device_module().stream(stream):
+        shared_output = forward_func(hidden_states)
+        return shared_output
+
+
+def process_routed_expert(hidden_states, topk_output, forward_func):
+    """
+    PREFETCH_MAX_SIZE: maximum size (bytes) for each prefetch operation.
+    This affects the time spent in prefetch:
+        time ≈ PREFETCH_MAX_SIZE / system_bandwidth
+    """
+    # import torch_npu
+    stream = get_routed_stream()
+    if stream is None:
+        stream = torch.get_device_module().Stream()
+        set_routed_stream(stream)
+    stream.wait_stream(torch.get_device_module().current_stream())
+    with torch.get_device_module().stream(stream):
+        shared_output = forward_func(hidden_states, topk_output)
+        return shared_output

@@ -1087,7 +1087,7 @@ class Indexer(CustomOp):
         past_key_states = forward_batch.token_to_kv_pool.get_index_k_buffer(layer_id)
 
         x = x.view(-1, self.hidden_size)
-        weights = self.weights_proj(x.float())[0]
+        weights = self.weights_proj(x.float())[0].to(dtype=torch.bfloat16)
         block_table = (
             block_table[: actual_seq_lengths_q.size()[0]] if is_prefill else block_table
         )

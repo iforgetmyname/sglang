@@ -9,6 +9,7 @@ from sglang.srt.layers.parameter import (
     PerTensorScaleParameter,
 )
 from sglang.srt.layers.quantization.base_config import LinearMethodBase
+from sgl_kernel_npu.quant.quant import quant
 
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -107,13 +108,10 @@ class NPUW8A8Int8LinearMethod(_NPULinearMethodBase):
 
         original_dtype = x.dtype
         if original_dtype != torch.int8:
-            x = torch.ops.npu.npu_quantize(
+            x = quant(
                 x,
-                layer.aclnn_input_scale_reciprocal,
-                layer.aclnn_input_offset,
-                torch.qint8,
-                -1,
-                False,
+                quant_scale=layer.aclnn_input_scale_reciprocal,
+                quant_offset=layer.aclnn_input_offset,
             )
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in Attention TP>1 case)
@@ -126,7 +124,7 @@ class NPUW8A8Int8LinearMethod(_NPULinearMethodBase):
             layer.weight,
             layer.deq_scale,
             bias=quant_bias,
-            output_dtype=original_dtype,
+            output_dtype=torch.bfloat16,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module):

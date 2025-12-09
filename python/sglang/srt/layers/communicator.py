@@ -372,6 +372,8 @@ class LayerCommunicator:
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
         quant_format: str = "",
+        func=None,
+        layer=None,
     ):
         if get_attn_tp_context().input_scattered:
             hidden_states, residual = self._tp_reduce_scatter(
@@ -421,7 +423,18 @@ class LayerCommunicator:
                         )
 
                     else:
-                        hidden_states = self.input_layernorm(hidden_states)
+                        if func is not None:
+                            hidden_states, residual = func(
+                                hidden_states,
+                                residual,
+                                self.input_layernorm.weight,
+                                self.input_layernorm.variance_epsilon,
+                                norm_bias=None,
+                                quant_scale=layer.aclnn_input_scale_reciprocal,
+                                quant_offset=layer.aclnn_input_offset,
+                            )
+                        else:
+                            hidden_states = self.input_layernorm(hidden_states)
                 else:
 
                     if _use_aiter and _is_gfx95_supported and ("mxfp4" in quant_format):
@@ -452,9 +465,20 @@ class LayerCommunicator:
                             output_unquantized_inp1=False,
                         )
                     else:
-                        hidden_states, residual = self.input_layernorm(
-                            hidden_states, residual
-                        )
+                        if func is not None:
+                            hidden_states, residual = func(
+                                hidden_states,
+                                residual,
+                                self.input_layernorm.weight,
+                                self.input_layernorm.variance_epsilon,
+                                norm_bias=None,
+                                quant_scale=layer.aclnn_input_scale_reciprocal,
+                                quant_offset=layer.aclnn_input_offset,
+                            )
+                        else:
+                            hidden_states, residual = self.input_layernorm(
+                                hidden_states, residual
+                            )
 
         hidden_states = self._communicate_simple_fn(
             hidden_states=hidden_states,
@@ -493,6 +517,8 @@ class LayerCommunicator:
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
         cache=None,
+        func=None,
+        layer=None,
     ):
         if cache is not None:
             self._context.cache = cache
@@ -503,6 +529,8 @@ class LayerCommunicator:
             forward_batch=forward_batch,
             layernorm=self.post_attention_layernorm,
             context=self._context,
+            layer=layer,
+            func=func,
         )
 
     def postprocess_layer(
@@ -638,10 +666,16 @@ class CommunicateSimpleFn:
         forward_batch: ForwardBatch,
         context: CommunicateContext,
     ) -> torch.Tensor:
-        hidden_states, local_hidden_states = (
-            get_local_dp_buffer(),
-            hidden_states,
-        )
+        if hidden_states.dtype == torch.bfloat16:
+            hidden_states, local_hidden_states = (
+                get_local_dp_buffer(),
+                hidden_states,
+            )
+        else:
+            local_hidden_states = hidden_states
+            world_size = get_attention_tp_size()
+            hidden_states = local_hidden_states.new_empty(world_size * local_hidden_states.shape[0],
+                                                          local_hidden_states.shape[1])
         attn_tp_all_gather_into_tensor(
             hidden_states,
             local_hidden_states,
@@ -725,6 +759,8 @@ class CommunicateWithAllReduceAndLayerNormFn:
         context: CommunicateContext,
         *,
         residual_input_mode,
+        func=None,
+        layer=None,
     ):
         if get_attn_tp_context().input_scattered:
             return CommunicateWithAllReduceAndLayerNormFn._tp_all_reduce_with_scattered_residual(
@@ -781,7 +817,18 @@ class CommunicateWithAllReduceAndLayerNormFn:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
                 if _is_npu and context.cache is not None:
                     _ = prepare_weight_cache(hidden_states, context.cache)
-                hidden_states, residual = layernorm(hidden_states, residual)
+                if func is not None:
+                    hidden_states, residual = func(
+                        hidden_states,
+                        residual,
+                        layernorm.weight,
+                        layernorm.variance_epsilon,
+                        norm_bias=None,
+                        quant_scale=layer.aclnn_input_scale_reciprocal,
+                        quant_offset=layer.aclnn_input_offset,
+                    )
+                else:
+                    hidden_states, residual = layernorm(hidden_states, residual)
         return hidden_states, residual
 
     @staticmethod

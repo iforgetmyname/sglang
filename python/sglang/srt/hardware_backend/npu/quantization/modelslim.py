@@ -54,8 +54,10 @@ def npu_wrapper_rmsnorm_forward(func):
                 x,
                 residual,
                 self.weight.data,
-                self.bias,
                 self.variance_epsilon,
+                norm_bias=self.bias,
+                quant_scale=None,
+                quant_offset=None,
             )
             return out.to(x.dtype), residual_out
 

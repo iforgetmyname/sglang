@@ -84,8 +84,9 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        embeds, residual = self.layer_communicator.prepare_attn(
-            embeds, residual, forward_batch
+        residual = hidden_states
+        embeds, _ = self.layer_communicator.prepare_attn(
+            embeds, None, forward_batch
         )
         hidden_states = self.hidden_norm(hidden_states)
         if hidden_states.shape[0] != 0:

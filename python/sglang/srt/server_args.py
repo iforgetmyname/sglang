@@ -440,7 +440,7 @@ class ServerArgs:
     speculative_ngram_branch_length: int = 18
     speculative_ngram_capacity: int = 10 * 1000 * 1000
     # For suffix decoding only
-    speculative_suffix_max_tree_depth: int = 24
+    speculative_suffix_max_tree_depth: int = 36
     speculative_suffix_max_cached_requests: int = 10000
     speculative_suffix_max_spec_factor: float = 1.0
     speculative_suffix_min_token_prob: float = 0.1

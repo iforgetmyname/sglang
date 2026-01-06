@@ -8,7 +8,7 @@ from sglang.srt.disaggregation.mooncake.transfer_engine import MooncakeTransferE
 from sglang.srt.disaggregation.utils import DisaggregationMode
 
 try:
-    from mf_adapter import TransferEngine
+    from mf_adapter import TransferEngine, set_conf_store_tls
 
     import_error = None
 except ImportError as e:
@@ -28,7 +28,7 @@ class AscendTransferEngine(MooncakeTransferEngine):
                 "Please install mf_adapter, for details, see docs/backend/pd_disaggregation.md"
             )
             raise import_error
-
+        set_conf_store_tls(False, "")
         self.engine = TransferEngine()
         self.hostname = hostname
         self.npu_id = npu_id

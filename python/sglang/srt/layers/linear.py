@@ -34,6 +34,9 @@ from sglang.srt.layers.parameter import (
 from sglang.srt.layers.quantization.unquant import UnquantizedLinearMethod
 from sglang.srt.layers.utils import pad_or_narrow_weight
 from sglang.srt.utils import get_bool_env_var, is_cpu, is_hip, is_npu, set_weight_attrs
+from sglang.srt.layers.dp_attention import get_attention_tp_team
+
+_use_catcoc = get_bool_env_var("SGLANG_USE_CAT_COC") and is_npu()
 
 if TYPE_CHECKING:
     from sglang.srt.layers.quantization.base_config import (
@@ -437,9 +440,8 @@ class ColumnParallelLinear(LinearBase):
                 # Fallback for parameters that don't accept additional args
                 param.load_column_parallel_weight(loaded_weight)
 
-    def forward(self, input_):
+    def forward(self, input_, layer_scatter_modes=None):
         bias = self.bias if not self.skip_bias_add else None
-
         # Matrix multiply.
         assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
@@ -1306,6 +1308,8 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
+        self.init_trans = None
+
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
@@ -1397,7 +1401,7 @@ class RowParallelLinear(LinearBase):
                 # Fallback for parameters that don't accept additional args
                 param.load_row_parallel_weight(loaded_weight)
 
-    def forward(self, input_, skip_all_reduce=False):
+    def forward(self, input_, skip_all_reduce=False, is_prefill=False):
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -1405,24 +1409,36 @@ class RowParallelLinear(LinearBase):
                 input_, num_partitions=self.tp_size
             )
             input_parallel = splitted_input[self.tp_rank].contiguous()
-
         # Matrix multiply.
         assert self.quant_method is not None
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        with use_symmetric_memory(
-            get_tp_group(), disabled=not is_allocation_symmetric()
+        if (
+            _use_catcoc and is_prefill
         ):
-            output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
-
-        if self.reduce_results and self.tp_size > 1 and not skip_all_reduce:
-            output = tensor_model_parallel_all_reduce(output_parallel)
+            if self.init_trans is None:
+                self.init_trans = self.weight.t().contiguous()
+            from sglang.srt.distributed.parallel_state import get_shmem_addr
+            g_shmem_addr = get_shmem_addr()
+            # input_parallel = input_parallel.view(-1, input_parallel.shape[-1])
+            input_c = torch.empty(input_parallel.shape[0],
+                                  self.weight.shape[0], dtype=input_parallel.dtype, device=input_parallel.device)
+            team_id = get_attention_tp_team()
+            # print(f"==== input_parallel: {input_parallel.shape}, self.weight: {self.weight.shape}")
+            torch.ops.npu.catcoc_matmul_allreduce(input_parallel, self.init_trans, input_c, g_shmem_addr, team_id)
+            output = input_c
         else:
-            output = output_parallel
+            with use_symmetric_memory(
+                get_tp_group(), disabled=not is_allocation_symmetric()
+            ):
+                output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
 
+            if self.reduce_results and self.tp_size > 1 and not skip_all_reduce:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+            else:
+                output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
-
         return output, output_bias
 
     def extra_repr(self) -> str:

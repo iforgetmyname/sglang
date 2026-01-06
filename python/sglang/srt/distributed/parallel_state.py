@@ -59,6 +59,7 @@ _is_npu = is_npu()
 _is_cpu = is_cpu()
 _is_xpu = is_xpu()
 _supports_custom_op = supports_custom_op()
+_use_catcoc = get_bool_env_var("SGLANG_USE_CAT_COC") and is_npu()
 
 
 TensorMetadata = namedtuple("TensorMetadata", ["device", "dtype", "size"])
@@ -1364,12 +1365,18 @@ class GroupCoordinator:
 
 
 _WORLD: Optional[GroupCoordinator] = None
+_G_SHEMEM_ADDR: int = None
+g_ash_size = 180 * 1024 * 1024
+g_malloc_size = 180 * 1024 * 1024
 
 
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, "world group is not initialized"
     return _WORLD
 
+def get_shmem_addr():
+    assert _G_SHEMEM_ADDR is not None, "g_shmem_addr is not initialized"
+    return _G_SHEMEM_ADDR
 
 def init_world_group(
     ranks: List[int], local_rank: int, backend: str
@@ -1584,7 +1591,20 @@ def init_distributed_environment(
         assert (
             _WORLD.world_size == torch.distributed.get_world_size()
         ), "world group already initialized with a different world size"
-
+    if _use_catcoc:
+        print(f'xxxxxxxxxxxxx op branch', flush=True)
+        import shmem as ash
+        from shmem import set_conf_store_tls
+        set_conf_store_tls(False, "")
+        init_attr = ash.InitAttr()
+        shmem_addr = os.environ.get("ASCEND_SHMEM_URL", "tcp://127.0.0.1:25000")
+        ash.shmem_set_attributes(rank, world_size, g_ash_size, shmem_addr, init_attr)
+        ret = ash.shmem_init(init_attr)
+        assert ret == 0, '[ERROR] aclshmem_init failed'
+        g_shmem_addr = ash.shmem_malloc(g_malloc_size)
+        global _G_SHEMEM_ADDR
+        if _G_SHEMEM_ADDR is None:
+            _G_SHEMEM_ADDR = g_shmem_addr
 
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,

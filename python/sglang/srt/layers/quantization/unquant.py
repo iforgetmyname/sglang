@@ -473,24 +473,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_ids = topk_ids.to(torch.int32)
         num_experts = layer.num_experts
         top_k = layer.top_k
-        row_idx_len = num_tokens * top_k
-        row_idx = (
-            torch.arange(0, row_idx_len, dtype=torch.int32, device=topk_weights.device)
-            .view(top_k, -1)
-            .permute(1, 0)
-            .contiguous()
-        )
+        hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
+            x,
+            topk_ids,
+            active_num=num_tokens * top_k,
+            expert_num=num_experts,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            quant_mode=-1,
+            active_expert_range=[0, num_experts])
 
-        hidden_states, expanded_row_idx, expanded_expert_idx = (
-            torch_npu.npu_moe_init_routing(
-                x, row_idx=row_idx, expert_idx=topk_ids, active_num=num_tokens
-            )
-        )
-
-        expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-            expanded_expert_idx, num_experts
-        )
-
+        expanded_row_idx = expanded_row_idx.view(-1, top_k).permute(1, 0).reshape(-1)
         expert_tokens = expert_tokens.to(torch.int64)
         if layer.w13_weight.shape[-1] == layer.hidden_size:
             w13 = layer.w13_weight.transpose(1, 2)
@@ -501,7 +494,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             x=[hidden_states],
             weight=[w13],
             split_item=2,
-            group_list_type=0,
+            group_list_type=1,
             group_type=0,
             group_list=expert_tokens,
             output_dtype=original_dtype,
@@ -520,7 +513,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             x=[hidden_states],
             weight=[w2],
             split_item=2,
-            group_list_type=0,
+            group_list_type=1,
             group_type=0,
             group_list=expert_tokens,
             output_dtype=original_dtype,

@@ -663,7 +663,7 @@ class Qwen3MoeAttention(nn.Module):
             fb,
             save_kv_cache=save_kv_cache,
         )
-        output, _ = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output, is_prefill=forward_batch.forward_mode.is_extend())
         return output
 
     def forward(

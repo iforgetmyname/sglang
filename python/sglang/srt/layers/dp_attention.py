@@ -20,7 +20,7 @@ from sglang.srt.distributed import (
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
-from sglang.srt.utils import get_bool_env_var, is_hip
+from sglang.srt.utils import get_bool_env_var, is_hip, is_npu
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -42,7 +42,8 @@ _ENABLE_DP_ATTENTION_FLAG: bool = False
 
 _is_hip = is_hip()
 _USE_ROCM700A_WA = _is_hip and get_bool_env_var("SGLANG_USE_ROCM700A")
-
+_use_catcoc = get_bool_env_var("SGLANG_USE_CAT_COC") and is_npu()
+_ATTN_CATCOC_TEAM: Optional[int] = None
 
 class DpPaddingMode(IntEnum):
 
@@ -309,7 +310,21 @@ def initialize_dp_attention(
         use_npu_communicator=False,
         group_name="attention_tp",
     )
+    # init catcoc team along with _ATTN_TP_GROUP
+    if _use_catcoc:
+        import shmem as ash
+        world_size = pp_size * tp_size
 
+        team_list = [
+            ash.team_split_strided(0, head, 1, _ATTN_TP_SIZE)
+            for head in range(0, pp_size * tp_size, _ATTN_TP_SIZE)
+        ]
+        print(f"rank:{tp_group.local_rank}, teams:{team_list}, local_rank:{_ATTN_TP_GROUP.local_rank}")
+
+        assert team_list[
+                   tp_group.local_rank // _ATTN_TP_SIZE] != -1, f"illegal team id for {tp_group.local_rank} and {_ATTN_TP_SIZE}"
+        global _ATTN_CATCOC_TEAM
+        _ATTN_CATCOC_TEAM = team_list[tp_group.local_rank // _ATTN_TP_SIZE]
     _DpGatheredBufferWrapper.set_metadata(
         hidden_size=model_config.hidden_size,
         dtype=model_config.dtype,
@@ -329,6 +344,10 @@ def get_attention_tp_group() -> GroupCoordinator:
     assert _ATTN_TP_GROUP is not None, "dp attention not initialized!"
     return _ATTN_TP_GROUP
 
+def get_attention_tp_team() -> int:
+    assert _use_catcoc, "catcoc not enabled when dp attention!"
+    assert _ATTN_CATCOC_TEAM is not None, "dp attention not initialized with using catcoc!"
+    return _ATTN_CATCOC_TEAM
 
 def get_attention_tp_rank() -> int:
     assert _ATTN_TP_RANK is not None, "dp attention not initialized!"

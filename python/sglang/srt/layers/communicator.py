@@ -77,6 +77,7 @@ elif _is_npu:
     from sglang.srt.hardware_backend.npu.cmo import prepare_weight_cache
 
 FUSE_ALLREDUCE_MAX_BATCH_SIZE = 2048
+_use_catcoc = get_bool_env_var("SGLANG_USE_CAT_COC") and is_npu()
 
 
 class ScatterMode(Enum):
@@ -792,7 +793,8 @@ class CommunicateWithAllReduceAndLayerNormFn:
                     hidden_states, residual
                 )
             else:
-                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+                if not _use_catcoc or (_use_catcoc and not forward_batch.forward_mode.is_extend()):
+                    hidden_states = tensor_model_parallel_all_reduce(hidden_states)
                 if _is_npu and context.cache is not None:
                     _ = prepare_weight_cache(hidden_states, context.cache)
                 hidden_states, residual = layernorm(hidden_states, residual)

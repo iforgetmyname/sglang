@@ -4,7 +4,7 @@ import time
 from typing import List, Optional, Tuple
 
 import torch
-
+import torch.nn.functional as F
 from sglang.srt.environ import envs
 from sglang.srt.hardware_backend.npu.graph_runner.eagle_draft_extend_npu_graph_runner import (
     EAGLEDraftExtendNpuGraphRunner,
@@ -20,7 +20,11 @@ from sglang.srt.managers.io_struct import UpdateWeightsFromTensorReqInput
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch
 from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.managers.tp_worker import TpModelWorker
-from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardBatch
+from sglang.srt.model_executor.forward_batch_info import (
+    CaptureHiddenMode,
+    ForwardBatch,
+    ForwardMode,
+)
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.speculative.base_spec_worker import BaseDraftWorker, BaseSpecWorker
 from sglang.srt.speculative.draft_utils import DraftBackendFactory
@@ -99,6 +103,7 @@ class EagleDraftWorker(BaseDraftWorker):
         self.speculative_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
+        self.enable_spec_overlap_reflow = envs.SGLANG_SPEC_ENABLE_OVERLAP_REFLOW.get()
 
         # Set constant
         EagleDraftInput.ALLOC_LEN_PER_DECODE = max(
@@ -266,16 +271,91 @@ class EagleDraftWorker(BaseDraftWorker):
                 f"Capture draft extend cuda graph end. Time elapsed: {time.perf_counter() - tic:.2f} s. mem usage={(before_mem - after_mem):.2f} GB. avail mem={after_mem:.2f} GB."
             )
 
-    def draft(self, model_worker_batch: ModelWorkerBatch):
-        draft_input: EagleDraftInput = model_worker_batch.spec_info
-        forward_batch, can_cuda_graph = draft_input.prepare_for_v2_draft(
-            self.req_to_token_pool,
-            model_worker_batch,
-            self.cuda_graph_runner,
-            self.draft_runner,
-            self.topk,
-            self.speculative_num_steps,
-        )
+    @staticmethod
+    def draft_wrapper(draft_func):
+        def wrapper(self, model_worker_batch: ModelWorkerBatch):
+            draft_input: EagleDraftInput = model_worker_batch.spec_info
+            forward_batch, can_cuda_graph = draft_input.prepare_for_v2_draft(
+                self.req_to_token_pool,
+                model_worker_batch,
+                self.cuda_graph_runner,
+                self.draft_runner,
+                self.topk,
+                self.speculative_num_steps,
+            )
+
+            parent_list, top_scores_index, draft_tokens = draft_func(
+                self, forward_batch, can_cuda_graph
+            )
+
+            if model_worker_batch.forward_mode.is_idle():
+                return EagleVerifyInput.create_idle_input(
+                    self.topk,
+                    self.speculative_num_steps,
+                    self.speculative_num_draft_tokens,
+                )
+
+            # Build tree mask
+            # Directly write to cuda graph buffers for verify attn
+            tree_mask_buf, position_buf = (
+                self.target_worker.model_runner.attn_backend.get_verify_buffers_to_fill_after_draft()
+            )
+
+            (
+                tree_mask,
+                position,
+                retrive_index,
+                retrive_next_token,
+                retrive_next_sibling,
+                draft_tokens,
+            ) = build_tree_kernel_efficient(
+                draft_input.verified_id,
+                parent_list,
+                top_scores_index,
+                draft_tokens,
+                model_worker_batch.seq_lens,
+                model_worker_batch.seq_lens_sum,
+                self.topk,
+                self.speculative_num_steps,
+                self.speculative_num_draft_tokens,
+                self.tree_mask_mode,
+                tree_mask_buf,
+                position_buf,
+            )
+
+            return EagleVerifyInput(
+                draft_token=draft_tokens,
+                custom_mask=tree_mask,
+                positions=position,
+                retrive_index=retrive_index,
+                retrive_next_token=retrive_next_token,
+                retrive_next_sibling=retrive_next_sibling,
+                retrive_cum_len=None,
+                spec_steps=self.speculative_num_steps,
+                topk=self.topk,
+                draft_token_num=self.speculative_num_draft_tokens,
+                capture_hidden_mode=None,
+                seq_lens_sum=None,
+                seq_lens_cpu=None,
+            )
+
+        return wrapper
+
+    @draft_wrapper
+    def prepare_verify_reflow(self, forward_batch, can_cuda_graph):
+        return self.draft_forward(forward_batch, is_prepare_reflow=True)
+
+    @draft_wrapper
+    def draft(self, forward_batch, can_cuda_graph):
+        # draft_input: EagleDraftInput = model_worker_batch.spec_info
+        # forward_batch, can_cuda_graph = draft_input.prepare_for_v2_draft(
+        #     self.req_to_token_pool,
+        #     model_worker_batch,
+        #     self.cuda_graph_runner,
+        #     self.draft_runner,
+        #     self.topk,
+        #     self.speculative_num_steps,
+        # )
 
         # Run draft
         if can_cuda_graph:
@@ -294,58 +374,81 @@ class EagleDraftWorker(BaseDraftWorker):
                 forward_batch
             )
 
-        if model_worker_batch.forward_mode.is_idle():
-            return EagleVerifyInput.create_idle_input(
-                self.topk,
-                self.speculative_num_steps,
-                self.speculative_num_draft_tokens,
-            )
+        return parent_list, top_scores_index, draft_tokens
+
+    def draft_v2(
+            self, model_worker_batch: ModelWorkerBatch, batch_result: GenerationBatchResult
+        ):
+        if self.speculative_num_steps <= 1:
+            return
 
         # Build tree mask
         # Directly write to cuda graph buffers for verify attn
-        tree_mask_buf, position_buf = (
-            self.target_worker.model_runner.attn_backend.get_verify_buffers_to_fill_after_draft()
-        )
+        # tree_mask_buf, position_buf = (
+        #     self.target_worker.model_runner.attn_backend.get_verify_buffers_to_fill_after_draft()
+        # )
+        seq_lens_bk = model_worker_batch.seq_lens
+        model_worker_batch.spec_info = batch_result.next_draft_input
 
-        (
-            tree_mask,
-            position,
-            retrive_index,
-            retrive_next_token,
-            retrive_next_sibling,
-            draft_tokens,
-        ) = build_tree_kernel_efficient(
-            draft_input.verified_id,
-            parent_list,
-            top_scores_index,
-            draft_tokens,
-            model_worker_batch.seq_lens,
-            model_worker_batch.seq_lens_sum,
+        model_worker_batch.forward_mode = (
+            ForwardMode.IDLE
+            if model_worker_batch.forward_mode.is_idle()
+            else ForwardMode.DECODE
+        )
+        model_worker_batch.input_ids = batch_result.next_draft_input.topk_index
+        # TODO(xjwei): These two will break the stream, but the real question now is: how much do they impact accuracy?
+        #  (Previously, they didn't seem to make a noticeable difference).
+        if not self.enable_spec_overlap_reflow:
+            model_worker_batch.seq_lens = batch_result.next_draft_input.new_seq_lens
+            model_worker_batch.seq_lens_cpu = model_worker_batch.seq_lens.cpu()
+
+        draft_input: EagleDraftInput = model_worker_batch.spec_info
+        forward_batch, can_cuda_graph = draft_input.prepare_for_v2_draft(
+            self.req_to_token_pool,
+            model_worker_batch,
+            self.cuda_graph_runner,
+            self.draft_runner,
             self.topk,
             self.speculative_num_steps,
-            self.speculative_num_draft_tokens,
-            self.tree_mask_mode,
-            tree_mask_buf,
-            position_buf,
         )
 
-        return EagleVerifyInput(
-            draft_token=draft_tokens,
-            custom_mask=tree_mask,
-            positions=position,
-            retrive_index=retrive_index,
-            retrive_next_token=retrive_next_token,
-            retrive_next_sibling=retrive_next_sibling,
-            retrive_cum_len=None,
-            spec_steps=self.speculative_num_steps,
-            topk=self.topk,
-            draft_token_num=self.speculative_num_draft_tokens,
-            capture_hidden_mode=None,
-            seq_lens_sum=None,
-            seq_lens_cpu=None,
+    # def draft_forward(self, forward_batch: ForwardBatch):
+        # Run draft
+        if can_cuda_graph:
+            ret_topk_p_list, ret_topk_index_list = self.cuda_graph_runner.replay(
+                forward_batch,
+            )
+        else:
+            if (
+                not forward_batch.forward_mode.is_idle()
+                and self.speculative_num_steps > 1
+            ):
+                self.draft_attn_backend.init_forward_metadata(forward_batch)
+            ret_topk_p_list, ret_topk_index_list = self.draft_forward(forward_batch)
+
+        next_draft_input = batch_result.next_draft_input
+        ret_topk_p_list = [next_draft_input.topk_p] + [ret_topk_p_list]
+        ret_topk_index_list = [next_draft_input.topk_index] + [ret_topk_index_list]
+        (
+            next_draft_input.topk_p,
+            next_draft_input.topk_index,
+            next_draft_input.hidden_states,
+        ) = (
+            torch.cat(ret_topk_p_list, dim=1).clone(),
+            torch.cat(ret_topk_index_list, dim=1).clone(),
+            None,  # if use spec overlap reflow, we do not need to save hidden_states for target mode
         )
 
-    def draft_forward(self, forward_batch: ForwardBatch):
+        model_worker_batch.seq_lens = seq_lens_bk
+
+    def draft_forward(
+        self, forward_batch: ForwardBatch, *, is_prepare_reflow: bool = False
+    ):
+        if is_prepare_reflow:
+            assert self.enable_spec_overlap_reflow, (
+                "The case where param `is_prepare_reflow` is `True` "
+                "exists only when `SGLANG_SPEC_ENABLE_OVERLAP_REFLOW` is set to `1`."
+            )
         # Parse args
         spec_info: EagleDraftInput = forward_batch.spec_info
         out_cache_loc = forward_batch.out_cache_loc

@@ -341,6 +341,7 @@ class ModelRunner:
         self.init_new_workspace = False
         self.kv_cache_memory = 0
         self.draft_model_idx = draft_model_idx
+        self.enable_spec_overlap_reflow = envs.SGLANG_SPEC_ENABLE_OVERLAP_REFLOW.get()
 
         self.remote_instance_transfer_engine = None
         self.remote_instance_transfer_engine_session_id = ""
@@ -1997,7 +1998,7 @@ class ModelRunner:
 
         # Initialize token_to_kv_pool
         is_nsa_model = is_deepseek_nsa(self.model_config.hf_config)
-        if self.server_args.attention_backend == "ascend" and not self.mambaish_config: 
+        if self.server_args.attention_backend == "ascend" and not self.mambaish_config:
             if self.use_mla_backend:
                 from sglang.srt.hardware_backend.npu.memory_pool_npu import (
                     NPUMLATokenToKVPool,
@@ -2959,6 +2960,7 @@ class ModelRunner:
             and forward_batch.global_num_tokens_gpu is not None
             and require_gathered_buffer(self.server_args)
             and not is_nsa_enable_prefill_cp()
+            and not self.enable_spec_overlap_reflow
         ):
             forward_batch.adjust_num_token_non_padded_for_attn_tp(
                 server_args=self.server_args,

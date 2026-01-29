@@ -150,7 +150,9 @@ class Glm4MoeForCausalLMNextN(Glm4MoeForCausalLM):
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        os.environ['SGLANG_DEEPEP_BF16_DISPATCH'] = '1'
         hidden_states = self.model(input_ids, positions, forward_batch)
+        os.environ['SGLANG_DEEPEP_BF16_DISPATCH'] = '0'
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )

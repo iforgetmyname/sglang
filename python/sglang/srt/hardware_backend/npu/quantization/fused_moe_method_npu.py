@@ -2,10 +2,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+import torch_npu
 
 from sglang.srt.hardware_backend.npu.utils import npu_format_cast
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
-from sglang.srt.utils import set_weight_attrs
+from sglang.srt.utils import set_weight_attrs, process_shared_expert, wait_share_stream, set_share_stream, get_share_stream
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe import MoeRunnerConfig
@@ -37,21 +38,46 @@ def npu_fused_experts(
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
     num_tokens = hidden_states.shape[0]
     num_experts = w13.shape[0]
-    row_idx_len = num_tokens * top_k
-    row_idx = (
-        torch.arange(0, row_idx_len, dtype=torch.int32, device=topk_weights.device)
-        .view(top_k, -1)
-        .permute(1, 0)
-        .contiguous()
-    )
-    hidden_states, expanded_row_idx, expanded_expert_idx = (
-        torch.ops.npu.npu_moe_init_routing(
-            hidden_states, row_idx=row_idx, expert_idx=topk_ids, active_num=num_tokens
+    # row_idx_len = num_tokens * top_k
+    # row_idx = (
+    #     torch.arange(0, row_idx_len, dtype=torch.int32, device=topk_weights.device)
+    #     .view(top_k, -1)
+    #     .permute(1, 0)
+    #     .contiguous()
+    # )
+    # hidden_states, expanded_row_idx, expanded_expert_idx = (
+    #     torch.ops.npu.npu_moe_init_routing(
+    #         hidden_states, row_idx=row_idx, expert_idx=topk_ids, active_num=num_tokens
+    #     )
+    # )
+    #
+    # expert_tokens = torch.ops.npu.npu_moe_compute_expert_tokens(
+    #     expanded_expert_idx, num_experts
+    # )
+    hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
+        torch_npu.npu_moe_init_routing_v2(
+            hidden_states,
+            topk_ids,
+            active_num=num_tokens * top_k,
+            expert_num=num_experts,
+            expert_tokens_num_type=1,
+            expert_tokens_num_flag=True,
+            quant_mode=-1,
+            active_expert_range=[0, num_experts],
         )
     )
-    expert_tokens = torch.ops.npu.npu_moe_compute_expert_tokens(
-        expanded_expert_idx, num_experts
-    )
+    # def permute_idx(input):
+    #     expanded_row_idx, top_k = input
+    #     return expanded_row_idx.view(-1, top_k).permute(1, 0).reshape(-1)
+
+    # stream = get_share_stream()
+    # if stream is None:
+    #     stream = torch.get_device_module().Stream()
+    #     set_share_stream(stream)
+    # stream.wait_stream(torch.get_device_module().current_stream())
+    # with torch.get_device_module().stream(stream):
+    expanded_row_idx = expanded_row_idx.view(-1, top_k).permute(1, 0).reshape(-1)
+    # expanded_row_idx = process_shared_expert((expanded_row_idx, top_k), permute_idx)
     expert_tokens = expert_tokens.to(torch.int64)
     # gmm1: gate_up_proj
     if not use_wna16:
@@ -66,12 +92,20 @@ def npu_fused_experts(
             "antiquant_offset": [w13_offset],
         }
 
+    # torch_npu.npu_grouped_matmul_swiglu_quant(
+    #     hidden_states,
+    #     weight=[w13],
+    #     group_list=expert_tokens,
+    #     weight_scale=[w13_scale.to(scale_dtype)],
+    #     x_scale=pertoken_scale
+    # )
+
     hidden_states = torch.ops.npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w13],
         **scale_args13,
         split_item=2,
-        group_list_type=0,
+        group_list_type=1,
         group_type=0,
         group_list=expert_tokens,
         output_dtype=original_dtype,
@@ -93,12 +127,12 @@ def npu_fused_experts(
         weight=[w2],
         **scale_args2,
         split_item=2,
-        group_list_type=0,
+        group_list_type=1,
         group_type=0,
         group_list=expert_tokens,
         output_dtype=original_dtype,
     )[0]
-
+    # wait_share_stream()
     final_hidden_states = torch.ops.npu.npu_moe_finalize_routing(
         hidden_states,
         skip1=None,
@@ -227,11 +261,11 @@ class NPUW8A8Int8DynamicMoEMethod(FusedMoEMethodBase):
         layer.w2_weight = torch.nn.Parameter(weight_data, requires_grad=False)
 
         layer.w13_weight_scale = torch.nn.Parameter(
-            layer.w13_weight_scale.data.squeeze(-1).contiguous().to(torch.float32),
+            layer.w13_weight_scale.data.squeeze(-1).contiguous().to(torch.bfloat16),
             requires_grad=False,
         )
         layer.w2_weight_scale = torch.nn.Parameter(
-            layer.w2_weight_scale.data.squeeze(-1).contiguous(), requires_grad=False
+            layer.w2_weight_scale.data.squeeze(-1).contiguous().to(torch.bfloat16), requires_grad=False
         )
         layer.w13_weight_offset = torch.nn.Parameter(
             layer.w13_weight_offset.data.squeeze(-1).contiguous(), requires_grad=False

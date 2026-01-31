@@ -84,9 +84,14 @@ from sglang.srt.utils import (
     is_cpu,
     is_cuda,
     is_hip,
+    is_npu,
     is_non_idle_and_non_empty,
     log_info_on_rank0,
     make_layers,
+    process_shared_expert,
+    wait_share_stream,
+    process_routed_expert,
+    wait_routed_stream,
 )
 
 _is_hip = is_hip()
@@ -95,9 +100,186 @@ _is_fp8_fnuz = is_fp8_fnuz()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_cpu = is_cpu()
+_is_npu = is_npu()
 _device_sm = get_device_sm()
 
 logger = logging.getLogger(__name__)
+
+
+import triton
+import triton.language as tl
+from sgl_kernel_npu.utils.triton_utils import get_device_properties
+
+
+@triton.jit
+def split_qkv_rmsnorm_kernel(
+    input_ptr,
+    q_ptr,
+    k_ptr,
+    v_ptr,
+    q_weight_ptr,
+    q_bias_ptr,
+    k_weight_ptr,
+    k_bias_ptr,
+    batch_size,
+    q_hidden_size: tl.constexpr,
+    kv_hidden_size: tl.constexpr,
+    total_hidden_size: tl.constexpr,
+    eps: tl.constexpr,
+    Q_BLOCK_SIZE: tl.constexpr,
+    KV_BLOCK_SIZE: tl.constexpr,
+    BIAS: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+):
+    row_pid = tl.program_id(0)
+    col_pid = tl.program_id(1)
+    row_step = tl.num_programs(0)
+    # q
+    weight_values = tl.load(q_weight_ptr + tl.arange(0, HEAD_DIM))
+    if BIAS:
+        bias_values = tl.load(q_bias_ptr + tl.arange(0, HEAD_DIM))
+    input_offset = row_pid * total_hidden_size
+    output_offset = row_pid * q_hidden_size
+    input_offset_step = row_step * total_hidden_size
+    output_offset_step = row_step * q_hidden_size
+    for row_idx in tl.range(row_pid, batch_size, row_step):
+        col_indices = col_pid * Q_BLOCK_SIZE + tl.arange(0, Q_BLOCK_SIZE)
+        valid_mask = col_indices < q_hidden_size
+        input_values = (
+            tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0)
+            .to(tl.float32)
+            .reshape(Q_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
+        )
+        squares = input_values * input_values
+        variances = tl.sum(squares, axis=1) / HEAD_DIM
+        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(
+            Q_BLOCK_SIZE // HEAD_DIM, 1
+        )
+        normalized_values = (
+            input_values * reciprocal_std
+        )  # (Q_BLOCK_SIZE//HEAD_DIM, HEAD_DIM)
+        if BIAS:
+            normalized_values = (normalized_values * weight_values + bias_values).to(
+                tl.float32
+            )
+        else:
+            normalized_values = (normalized_values * weight_values).to(tl.float32)
+
+        # store
+        tl.store(
+            q_ptr + output_offset + col_indices,
+            normalized_values.to(q_ptr.dtype.element_ty).reshape(Q_BLOCK_SIZE),
+            mask=valid_mask,
+        )
+        input_offset += input_offset_step
+        output_offset += output_offset_step
+
+    # k
+    weight_values = tl.load(k_weight_ptr + tl.arange(0, HEAD_DIM))
+    if BIAS:
+        bias_values = tl.load(k_bias_ptr + tl.arange(0, HEAD_DIM))
+    input_offset = row_pid * total_hidden_size + q_hidden_size
+    output_offset = row_pid * kv_hidden_size
+    output_offset_step = row_step * kv_hidden_size
+    for row_idx in tl.range(row_pid, batch_size, row_step):
+        col_indices = col_pid * KV_BLOCK_SIZE + tl.arange(0, KV_BLOCK_SIZE)
+        valid_mask = col_indices < kv_hidden_size
+        input_values = (
+            tl.load(input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0)
+            .to(tl.float32)
+            .reshape(KV_BLOCK_SIZE // HEAD_DIM, HEAD_DIM)
+        )
+        squares = input_values * input_values
+        variances = tl.sum(squares, axis=1) / HEAD_DIM
+        reciprocal_std = (1 / tl.sqrt(variances + eps)).reshape(
+            KV_BLOCK_SIZE // HEAD_DIM, 1
+        )
+        normalized_values = (
+            input_values * reciprocal_std
+        )  # (KV_BLOCK_SIZE/HEAD_DIM, HEAD_DIM)
+        if BIAS:
+            normalized_values = (normalized_values * weight_values + bias_values).to(
+                tl.float32
+            )
+        else:
+            normalized_values = (normalized_values * weight_values).to(tl.float32)
+
+        # store
+        tl.store(
+            k_ptr + output_offset + col_indices,
+            normalized_values.to(tl.bfloat16).reshape(KV_BLOCK_SIZE),
+            mask=valid_mask,
+        )
+        input_offset += input_offset_step
+        output_offset += output_offset_step
+
+    # v
+    input_offset = row_pid * total_hidden_size + q_hidden_size + kv_hidden_size
+    output_offset = row_pid * kv_hidden_size
+    for _ in tl.range(row_pid, batch_size, row_step):
+        col_indices = col_pid * KV_BLOCK_SIZE + tl.arange(0, KV_BLOCK_SIZE)
+        valid_mask = col_indices < kv_hidden_size
+        input_values = tl.load(
+            input_ptr + input_offset + col_indices, mask=valid_mask, other=0.0
+        )
+        tl.store(v_ptr + output_offset + col_indices, input_values, mask=valid_mask)
+        input_offset += input_offset_step
+        output_offset += output_offset_step
+
+
+def split_qkv_rmsnorm(
+    input,
+    q_weight,
+    k_weight,
+    q_hidden_size,
+    kv_hidden_size,
+    head_dim,
+    eps,
+    q_bias,
+    k_bias,
+):
+    _, num_vectorcore = get_device_properties()
+
+    KV_BLOCK_SIZE = triton.next_power_of_2(head_dim)
+    assert KV_BLOCK_SIZE == head_dim
+    assert q_hidden_size % kv_hidden_size == 0
+    Q_BLOCK_SIZE = q_hidden_size // kv_hidden_size * head_dim
+    batch_size = input.shape[0]
+    total_hidden_size = q_hidden_size + kv_hidden_size * 2
+    q_output = torch.empty(
+        batch_size, q_hidden_size, device=input.device, dtype=input.dtype
+    )
+    k_output = torch.empty(
+        batch_size, kv_hidden_size, device=input.device, dtype=input.dtype
+    )
+    v_output = torch.empty(
+        batch_size, kv_hidden_size, device=input.device, dtype=input.dtype
+    )
+    n_cols = kv_hidden_size // KV_BLOCK_SIZE
+    assert num_vectorcore % n_cols == 0
+    n_rows = num_vectorcore // n_cols
+    BIAS = q_bias is not None
+
+    split_qkv_rmsnorm_kernel[(n_rows, n_cols, 1)](
+        input,
+        q_output,
+        k_output,
+        v_output,
+        q_weight,
+        q_bias,
+        k_weight,
+        k_bias,
+        batch_size,
+        q_hidden_size,
+        kv_hidden_size,
+        total_hidden_size,
+        eps,
+        Q_BLOCK_SIZE,
+        KV_BLOCK_SIZE,
+        BIAS,
+        head_dim,
+    )
+    return q_output, k_output, v_output
 
 
 class Glm4MoeMLP(nn.Module):
@@ -293,9 +475,21 @@ class Glm4MoeAttention(nn.Module):
         if hidden_states.shape[0] == 0:
             return hidden_states, forward_batch, None
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if self.use_qk_norm:
-            q, k = self._apply_qk_norm(q, k)
+
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # if self.use_qk_norm:
+        #     q, k = self._apply_qk_norm(q, k)
+        q, k, v = split_qkv_rmsnorm(
+            qkv,
+            self.q_norm.weight,
+            self.k_norm.weight,
+            self.q_size,
+            self.kv_size,
+            self.head_dim,
+            self.q_norm.variance_epsilon,
+            q_bias=getattr(self.q_norm, "bias", None),
+            k_bias=getattr(self.k_norm, "bias", None),
+        )
         q, k = self.rotary_emb(positions, q, k)
         inner_state = q, k, v, forward_batch
         return None, forward_batch, inner_state
@@ -526,12 +720,16 @@ class Glm4MoeSparseMoeBlock(nn.Module):
             shared_output = self._forward_shared_experts(hidden_states)
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
+            # shared_output = process_shared_expert(hidden_states, self._forward_shared_experts)
             topk_output = self.topk(hidden_states, router_logits)
         else:
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
+        # final_hidden_states = process_routed_expert(hidden_states, topk_output, self.experts)
+        # wait_share_stream()
+        # wait_routed_stream()
         if not _is_cuda and not _use_aiter:
             final_hidden_states *= self.routed_scaling_factor
         if shared_output is not None:

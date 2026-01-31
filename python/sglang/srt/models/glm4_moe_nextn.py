@@ -13,7 +13,7 @@
 # ==============================================================================
 
 """Inference-only GLM-4.5, GLM-4.6 Speculative Decoding."""
-import os
+
 import logging
 from typing import Iterable, Optional, Tuple
 

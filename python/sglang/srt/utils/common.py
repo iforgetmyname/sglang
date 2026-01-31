@@ -3795,7 +3795,7 @@ def get_share_stream():
 def set_share_stream(stream):
     global share_stream
     share_stream = stream
-    torch.npu.set_stream_limit(share_stream, 4, 8)
+    # torch.npu.set_stream_limit(share_stream, 4, 8)
 
 
 def get_routed_stream():
@@ -3841,7 +3841,7 @@ def process_shared_expert(hidden_states, forward_func):
     stream.wait_stream(torch.get_device_module().current_stream())
     with torch.get_device_module().stream(stream):
         shared_output = forward_func(hidden_states)
-        return shared_output
+    return shared_output
 
 def process_routed_expert(hidden_states, topk_output, forward_func):
     """
@@ -3857,4 +3857,4 @@ def process_routed_expert(hidden_states, topk_output, forward_func):
     stream.wait_stream(torch.get_device_module().current_stream())
     with torch.get_device_module().stream(stream):
         shared_output = forward_func(hidden_states, topk_output)
-        return shared_output
+    return shared_output

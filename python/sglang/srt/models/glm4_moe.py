@@ -282,6 +282,62 @@ def split_qkv_rmsnorm(
     return q_output, k_output, v_output
 
 
+@triton.jit
+def mul_add_kernel(
+    input1_ptr,
+    input2_ptr,
+    output_ptr,
+    factor: tl.constexpr,
+    batch_size: tl.constexpr,
+    hidden_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_start = tl.program_id(0)
+    row_step = tl.num_programs(0)
+    cols = tl.arange(0, BLOCK_SIZE)
+    valid_mask = cols < hidden_size
+    input_offsets = row_start * hidden_size + cols
+    for row_idx in tl.range(row_start, batch_size, row_step):
+        routed_values = tl.load(input1_ptr + input_offsets, mask=valid_mask, other=0.0)
+        shared_values = tl.load(input2_ptr + input_offsets, mask=valid_mask, other=0.0)
+        buffered_values = routed_values * factor + shared_values
+        tl.store(
+            output_ptr + row_idx * hidden_size + cols,
+            buffered_values,
+            mask=valid_mask,
+        )
+
+        input_offsets += row_step * hidden_size
+
+
+def mul_add(
+    routed_input,
+    shared_input,
+    scaling_factor,
+):
+    _, num_vectorcore = get_device_properties()
+
+    batch_size = routed_input.shape[0]
+    hidden_size = routed_input.shape[1]
+    BLOCK_SIZE = triton.next_power_of_2(hidden_size)
+    n_rows = min(batch_size, num_vectorcore)
+
+    output = torch.empty(
+        batch_size, hidden_size, device=routed_input.device, dtype=routed_input.dtype
+    )
+
+    mul_add_kernel[(n_rows, 1, 1)](
+        routed_input,
+        shared_input,
+        output,
+        scaling_factor,
+        batch_size,
+        hidden_size,
+        BLOCK_SIZE,
+    )
+    return output
+
+
 class Glm4MoeMLP(nn.Module):
     def __init__(
         self,
@@ -668,7 +724,7 @@ class Glm4MoeSparseMoeBlock(nn.Module):
                 )
             else:
                 return self.forward_normal(
-                    hidden_states, should_allreduce_fusion, use_reduce_scatter
+                    hidden_states, should_allreduce_fusion, use_reduce_scatter, forward_batch,
                 )
         else:
             return self.forward_deepep(hidden_states, forward_batch)
@@ -715,11 +771,20 @@ class Glm4MoeSparseMoeBlock(nn.Module):
         hidden_states: torch.Tensor,
         should_allreduce_fusion: bool = False,
         use_reduce_scatter: bool = False,
+        forward_batch = None,
     ) -> torch.Tensor:
+        is_prefill = (
+            forward_batch.forward_mode.is_extend()
+            or forward_batch.forward_mode.is_target_verify()
+        )
         if hidden_states.shape[0] > 0:
-            shared_output = self._forward_shared_experts(hidden_states)
-            # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states)
+            if is_prefill:
+                router_logits = self.gate(hidden_states)
+                shared_output = process_shared_expert(hidden_states, self._forward_shared_experts)
+            else:
+                shared_output = self._forward_shared_experts(hidden_states)
+                # router_logits: (num_tokens, n_experts)
+                router_logits = self.gate(hidden_states)
             # shared_output = process_shared_expert(hidden_states, self._forward_shared_experts)
             topk_output = self.topk(hidden_states, router_logits)
         else:
@@ -727,18 +792,20 @@ class Glm4MoeSparseMoeBlock(nn.Module):
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
         final_hidden_states = self.experts(hidden_states, topk_output)
+        if is_prefill:
         # final_hidden_states = process_routed_expert(hidden_states, topk_output, self.experts)
-        # wait_share_stream()
+            wait_share_stream()
         # wait_routed_stream()
-        if not _is_cuda and not _use_aiter:
-            final_hidden_states *= self.routed_scaling_factor
-        if shared_output is not None:
-            with use_symmetric_memory(
-                parallel_state.get_tp_group(), disabled=not is_allocation_symmetric()
-            ):
-                final_hidden_states_out = torch.empty_like(final_hidden_states)
-            torch.add(final_hidden_states, shared_output, out=final_hidden_states_out)
-            final_hidden_states = final_hidden_states_out
+        final_hidden_states = mul_add(final_hidden_states, shared_output, self.routed_scaling_factor)
+        # if not _is_cuda and not _use_aiter:
+        #     final_hidden_states *= self.routed_scaling_factor
+        # if shared_output is not None:
+        #     with use_symmetric_memory(
+        #         parallel_state.get_tp_group(), disabled=not is_allocation_symmetric()
+        #     ):
+        #         final_hidden_states_out = torch.empty_like(final_hidden_states)
+        #     torch.add(final_hidden_states, shared_output, out=final_hidden_states_out)
+        #     final_hidden_states = final_hidden_states_out
         if (
             self.tp_size > 1
             and not should_allreduce_fusion

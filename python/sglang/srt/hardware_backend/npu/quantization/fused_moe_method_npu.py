@@ -6,7 +6,8 @@ import torch_npu
 
 from sglang.srt.hardware_backend.npu.utils import npu_format_cast
 from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
-from sglang.srt.utils import set_weight_attrs, process_shared_expert, wait_share_stream, set_share_stream, get_share_stream
+from sglang.srt.utils import set_weight_attrs
+from sglang.srt.hardware_backend.npu.cmo import set_cmo_stream, get_cmo_stream, wait_cmo_stream
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe import MoeRunnerConfig
@@ -76,7 +77,7 @@ def npu_fused_experts(
     #     set_share_stream(stream)
     # stream.wait_stream(torch.get_device_module().current_stream())
     # with torch.get_device_module().stream(stream):
-    expanded_row_idx = expanded_row_idx.view(-1, top_k).permute(1, 0).reshape(-1)
+    # expanded_row_idx = expanded_row_idx.view(-1, top_k).permute(1, 0).reshape(-1)
     # expanded_row_idx = process_shared_expert((expanded_row_idx, top_k), permute_idx)
     expert_tokens = expert_tokens.to(torch.int64)
     # gmm1: gate_up_proj
@@ -92,11 +93,11 @@ def npu_fused_experts(
             "antiquant_offset": [w13_offset],
         }
 
-    # torch_npu.npu_grouped_matmul_swiglu_quant(
+    # hidden_states, pertoken_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
     #     hidden_states,
-    #     weight=[w13],
+    #     weight=w13,
     #     group_list=expert_tokens,
-    #     weight_scale=[w13_scale.to(scale_dtype)],
+    #     weight_scale=w13_scale.to(scale_dtype),
     #     x_scale=pertoken_scale
     # )
 
@@ -122,6 +123,13 @@ def npu_fused_experts(
     else:
         scale_args2 = {"antiquant_scale": [w2_scale], "antiquant_offset": [w2_offset]}
     # gmm2: down_proj
+    stream = get_cmo_stream()
+    if stream is None:
+        stream = torch.npu.Stream()
+        set_cmo_stream(stream)
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        expanded_row_idx = expanded_row_idx.view(-1, top_k).permute(1, 0).reshape(-1)
     hidden_states = torch.ops.npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w2],
@@ -132,7 +140,7 @@ def npu_fused_experts(
         group_list=expert_tokens,
         output_dtype=original_dtype,
     )[0]
-    # wait_share_stream()
+    wait_cmo_stream()
     final_hidden_states = torch.ops.npu.npu_moe_finalize_routing(
         hidden_states,
         skip1=None,

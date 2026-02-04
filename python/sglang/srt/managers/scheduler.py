@@ -1056,7 +1056,7 @@ class Scheduler(
     def event_loop_normal(self):
         """A normal scheduler loop."""
         enable_profiling = envs.SGLANG_NPU_PROFILING.get() and self.tp_rank == 0
-        prof_bs = envs.SGLANG_NPU_PROFILING_BS.get()
+        prof_bs = int(envs.SGLANG_NPU_PROFILING_BS.get())
         prof_step = envs.SGLANG_NPU_PROFILING_STEP.get()
         profiling_stage: str = envs.SGLANG_NPU_PROFILING_STAGE.get()
         if enable_profiling:
@@ -1111,7 +1111,7 @@ class Scheduler(
                     ):
                         is_prof_stage = True
 
-                    if len(batch.reqs) >= prof_bs and prof_cnt == 0 and is_prof_stage:
+                    if len(batch.reqs) >= prof_bs and prof_cnt == 17 and is_prof_stage:
                         prof.start()
                         prof_cnt += 1
                     if prof_cnt > 0 and is_prof_stage:
@@ -1124,8 +1124,8 @@ class Scheduler(
                 self.process_batch_result(batch, result)
                 if (
                     enable_profiling
-                    and prof_cnt > 0
-                    and prof_cnt < prof_step
+                    and prof_cnt > 17
+                    and prof_cnt < prof_step + 17
                     and is_prof_stage
                 ):
                     prof.step()

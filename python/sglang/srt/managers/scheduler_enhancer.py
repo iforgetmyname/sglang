@@ -1,6 +1,8 @@
+import os
+
 import torch
 from sglang.srt.environ import envs
-
+is_stable = False
 
 class SchedulerEnhancer:
     def __init__(
@@ -64,12 +66,19 @@ class SchedulerEnhancer:
                 and self.max_running_requests - int(tp0_info[:, 0].max().item())
                 < int(tp0_info[:, 1].max().item())
             )
+            global is_stable
+            stable_bs = int(os.getenv("SCHEDULER_STABLE_BATCH_SIZE", "0"))
+            enable_stable = os.getenv("SCHEDULER_ENABLE_STABLE", None)
+            if enable_stable and stable_bs == int(tp0_info[:, 0].max().item()):
+                is_stable = True
+            elif int(tp0_info[:, 0].max().item()) == 0:
+                is_stable = False
             prefill_delay_level2 = (
                 envs.SGLANG_SCHEDULER_DECREASE_PREFILL_IDLE.get() == 2
                 and int(tp0_info[:, 0].min().item()) < self.max_running_requests
                 and int(tp0_info[:, 0].max().item()) == self.max_running_requests
             )
-            if prefill_delay_level1 or prefill_delay_level2:
+            if prefill_delay_level1 or prefill_delay_level2 or is_stable:
                 self.stable_count += 1
                 if self.stable_count < self.max_stable_count:
                     return False

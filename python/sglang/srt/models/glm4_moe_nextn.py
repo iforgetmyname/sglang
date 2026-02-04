@@ -13,7 +13,7 @@
 # ==============================================================================
 
 """Inference-only GLM-4.5, GLM-4.6 Speculative Decoding."""
-
+import os
 import logging
 from typing import Iterable, Optional, Tuple
 
@@ -52,7 +52,7 @@ class Glm4MoeModelNextN(nn.Module):
                 "Overriding Glm4MoeForCausalLMNextN quant config for modelopt_fp4 GLM-4.5 / GLM-4.6 model."
             )
             quant_config = None
-
+        quant_config = None
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -151,8 +151,10 @@ class Glm4MoeForCausalLMNextN(Glm4MoeForCausalLM):
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
         os.environ['SGLANG_DEEPEP_BF16_DISPATCH'] = '1'
+        os.environ['DEEP_NORMAL_MODE_USE_INT8_QUANT'] = "0"
         hidden_states = self.model(input_ids, positions, forward_batch)
         os.environ['SGLANG_DEEPEP_BF16_DISPATCH'] = '0'
+        os.environ['DEEP_NORMAL_MODE_USE_INT8_QUANT'] = "1"
         return self.logits_processor(
             input_ids, hidden_states, self.lm_head, forward_batch
         )

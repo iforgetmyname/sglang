@@ -93,6 +93,7 @@ from sglang.srt.utils import (
     process_routed_expert,
     wait_routed_stream,
 )
+from sglang.srt.hardware_backend.npu.cmo import set_cmo_stream, get_cmo_stream, wait_cmo_stream
 
 _is_hip = is_hip()
 _is_cuda = is_cuda()
@@ -819,10 +820,17 @@ class Glm4MoeSparseMoeBlock(nn.Module):
         self, hidden_states: torch.Tensor, forward_batch: ForwardBatch
     ) -> torch.Tensor:
         shared_output = None
+        is_prefill = (
+            forward_batch.forward_mode.is_extend()
+            or forward_batch.forward_mode.is_target_verify()
+        )
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
-            shared_output = self._forward_shared_experts(hidden_states)
+            if is_prefill:
+                shared_output = process_shared_expert(hidden_states, self._forward_shared_experts)
+            else:
+                shared_output = self._forward_shared_experts(hidden_states)
             topk_output = self.topk(
                 hidden_states,
                 router_logits,
@@ -837,6 +845,8 @@ class Glm4MoeSparseMoeBlock(nn.Module):
             hidden_states=hidden_states,
             topk_output=topk_output,
         )
+        if is_prefill:
+            wait_share_stream()
 
         if shared_output is not None:
             x = shared_output

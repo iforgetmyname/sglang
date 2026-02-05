@@ -1103,15 +1103,15 @@ class Scheduler(
             # Launch the current batch
             if batch:
                 if enable_profiling:
-                    is_prof_stage = False
-                    if (
-                        profiling_stage == "decode" and batch.forward_mode.is_decode()
-                    ) or (
-                        profiling_stage == "prefill" and batch.forward_mode.is_extend()
-                    ):
-                        is_prof_stage = True
+                    # is_prof_stage = False
+                    # if (
+                    #     profiling_stage == "decode" and batch.forward_mode.is_decode()
+                    # ) or (
+                    #     profiling_stage == "prefill" and batch.forward_mode.is_extend()
+                    # ):
+                    is_prof_stage = True
 
-                    if len(batch.reqs) >= prof_bs and prof_cnt == 17 and is_prof_stage:
+                    if len(batch.reqs) >= prof_bs and prof_cnt == 0 and is_prof_stage:
                         prof.start()
                         prof_cnt += 1
                     if prof_cnt > 0 and is_prof_stage:
@@ -1124,8 +1124,8 @@ class Scheduler(
                 self.process_batch_result(batch, result)
                 if (
                     enable_profiling
-                    and prof_cnt > 17
-                    and prof_cnt < prof_step + 17
+                    and prof_cnt > 0
+                    and prof_cnt < prof_step + 0
                     and is_prof_stage
                 ):
                     prof.step()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -1136,6 +1137,10 @@ class AscendAttnBackend(AttentionBackend):
             if not self.graph_mode:
                 num_token_padding = query.shape[0]
                 query = query[: forward_batch.num_token_non_padded_cpu]
+            if os.getenv("SGLANG_ENABLE_NO_PADDING", None):
+                num_token_padding = query.shape[0]
+                no_pad_bs = int(os.getenv("SGLANG_NO_PAD_BS", '0'))
+                query = query[: no_pad_bs]
             if self.forward_metadata.seq_lens_cpu_int is None:
                 actual_seq_lengths_kv = self.forward_metadata.seq_lens_cpu_list
             else:
@@ -1178,6 +1183,18 @@ class AscendAttnBackend(AttentionBackend):
                         attn_output,
                         attn_output.new_zeros(
                             num_token_padding - forward_batch.num_token_non_padded_cpu,
+                            *attn_output.shape[1:],
+                        ),
+                    ],
+                    dim=0,
+                )
+            if os.getenv("SGLANG_ENABLE_NO_PADDING", None):
+                no_pad_bs = int(os.getenv("SGLANG_NO_PAD_BS", '0'))
+                attn_output = torch.cat(
+                    [
+                        attn_output,
+                        attn_output.new_zeros(
+                            num_token_padding - no_pad_bs,
                             *attn_output.shape[1:],
                         ),
                     ],
